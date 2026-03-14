@@ -1,0 +1,328 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Serverless Insurance Risk Scoring API
+  Solutions Architect Demo Project
+  Services: API Gateway, Lambda, S3, DynamoDB, SNS, SES, Cognito, CloudWatch, IAM
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: risk-scoring-api
+    Description: Used as prefix for all resource names
+
+  AlertEmail:
+    Type: String
+    Description: Email address to receive high-risk alerts
+    Default: your@email.com
+
+  HighRiskThreshold:
+    Type: Number
+    Default: 0.75
+    MinValue: 0.0
+    MaxValue: 1.0
+    Description: Risk score threshold for triggering alerts
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+# ─────────────────────────────────────────────
+# RESOURCES
+# ─────────────────────────────────────────────
+Resources:
+
+  # ── S3: Model Storage Bucket ──────────────────────────────────────────────
+  ModelBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-models-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveOldModels
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── DynamoDB: Results + Audit Log ─────────────────────────────────────────
+  ResultsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-results-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: request_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: request_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ── SNS: High Risk Alerts ─────────────────────────────────────────────────
+  HighRiskAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-high-risk-alerts-${Environment}"
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ── IAM: Lambda Execution Role ────────────────────────────────────────────
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-lambda-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RiskScoringPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # S3 — read model artifacts only
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:HeadObject
+                Resource: !Sub "${ModelBucket.Arn}/models/*"
+              # DynamoDB — write results
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource: !GetAtt ResultsTable.Arn
+              # SNS — publish alerts
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref HighRiskAlertTopic
+              # CloudWatch — custom metrics
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  # ── Lambda: Risk Scoring Function ─────────────────────────────────────────
+  RiskScoringFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-scorer-${Environment}"
+      Runtime: python3.11
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          MODEL_BUCKET: !Ref ModelBucket
+          MODEL_KEY: "models/risk_model.pkl"
+          DYNAMODB_TABLE: !Ref ResultsTable
+          SNS_TOPIC_ARN: !Ref HighRiskAlertTopic
+          HIGH_RISK_THRESHOLD: !Ref HighRiskThreshold
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          # Placeholder — deploy real code via SAM or Lambda update-function-code
+          def lambda_handler(event, context):
+              return {"statusCode": 200, "body": "Deploy real code via scripts/deploy.sh"}
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda permission for API Gateway
+  LambdaApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RiskScoringFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RiskScoringApi}/*"
+
+  # ── API Gateway ───────────────────────────────────────────────────────────
+  RiskScoringApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${ProjectName}-api-${Environment}"
+      Description: "Insurance Risk Scoring REST API"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # /score-risk resource
+  ScoreRiskResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RiskScoringApi
+      ParentId: !GetAtt RiskScoringApi.RootResourceId
+      PathPart: score-risk
+
+  # POST /score-risk method
+  ScoreRiskPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RiskScoringApi
+      ResourceId: !Ref ScoreRiskResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RiskScoringFunction.Arn}/invocations"
+
+  # /health resource
+  HealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RiskScoringApi
+      ParentId: !GetAtt RiskScoringApi.RootResourceId
+      PathPart: health
+
+  HealthGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RiskScoringApi
+      ResourceId: !Ref HealthResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RiskScoringFunction.Arn}/invocations"
+
+  # API Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ScoreRiskPostMethod
+      - HealthGetMethod
+    Properties:
+      RestApiId: !Ref RiskScoringApi
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref RiskScoringApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: !Ref Environment
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          MetricsEnabled: true
+          DataTraceEnabled: false
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 50
+
+  # ── CloudWatch: Alarms ────────────────────────────────────────────────────
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-lambda-errors-${Environment}"
+      AlarmDescription: "Lambda function error rate exceeded threshold"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref RiskScoringFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref HighRiskAlertTopic
+
+  ApiLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-api-latency-${Environment}"
+      AlarmDescription: "API Gateway latency exceeded 3 seconds"
+      MetricName: Latency
+      Namespace: AWS/ApiGateway
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref RiskScoringApi
+      Statistic: p99
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 3000
+      ComparisonOperator: GreaterThanThreshold
+
+# ─────────────────────────────────────────────
+# OUTPUTS
+# ─────────────────────────────────────────────
+Outputs:
+  ApiEndpoint:
+    Description: "API Gateway base URL"
+    Value: !Sub "https://${RiskScoringApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+    Export:
+      Name: !Sub "${ProjectName}-api-endpoint"
+
+  ScoreRiskEndpoint:
+    Description: "Risk scoring endpoint"
+    Value: !Sub "https://${RiskScoringApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/score-risk"
+
+  ModelBucketName:
+    Description: "S3 bucket for model artifacts"
+    Value: !Ref ModelBucket
+    Export:
+      Name: !Sub "${ProjectName}-model-bucket"
+
+  DynamoDBTable:
+    Description: "DynamoDB results table"
+    Value: !Ref ResultsTable
+
+  LambdaFunctionName:
+    Description: "Lambda function name"
+    Value: !Ref RiskScoringFunction
+
+  SNSTopicArn:
+    Description: "High risk alert topic ARN"
+    Value: !Ref HighRiskAlertTopic
