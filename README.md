@@ -267,18 +267,6 @@ Best model selected by ROC-AUC score at training time.
 - **Resilience** (CloudWatch alarms, structured error handling, health checks)
 - **Observability** (structured logging, custom metrics, audit trail)
 
----
 
-## 👤 Author
 
-**[Your Name]**
-AWS Certified Solutions Architect | AWS Certified Data Engineer
-Data Scientist & Actuary
 
-📧 your@email.com
-🌐 www.yourwebsite.com
-💼 [LinkedIn](https://linkedin.com/in/yourprofile)
-
----
-
-*Built to demonstrate production-grade AWS Solutions Architecture using a real actuarial and data science use case.*
